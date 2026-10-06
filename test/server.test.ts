@@ -10,15 +10,22 @@ import { findMainClasses, parseJavacOutput } from '../server/java-source.ts'
 import { findJdk } from '../server/jdk.ts'
 import {
   COLLAB_PATH,
+  IMAGE_API,
   K_CONSOLE,
   K_DIAGNOSTICS,
   K_FILES,
+  K_POSTED,
+  K_PROBLEMS,
   K_RUN,
   K_TUTEES,
+  MAX_IMAGE_BYTES,
+  PROBLEM_DOC,
   ROSTER_DOC,
+  problemImageUrl,
   tuteeDocName,
   type ConsoleEntry,
   type JavaDiagnostic,
+  type ProblemEntry,
   type RunCommand,
 } from '../shared/protocol.ts'
 
@@ -62,6 +69,18 @@ const consoleText = (doc: Y.Doc) =>
     .join('')
 const runState = (doc: Y.Doc) => doc.getMap(K_RUN).get('state')
 const send = (p: HocuspocusProvider, cmd: RunCommand) => p.sendStateless(JSON.stringify(cmd))
+
+// 1×1 transparent PNG
+const PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+  'base64',
+)
+const upload = (body: Buffer | string, code?: string) =>
+  fetch(`${BASE}${IMAGE_API}`, {
+    method: 'POST',
+    body: typeof body === 'string' ? body : new Uint8Array(body),
+    headers: code ? { 'X-Tutor-Code': code } : {},
+  })
 
 async function join(name: string) {
   const res = await fetch(`${BASE}/api/join`, { method: 'POST', body: JSON.stringify({ name }) })
@@ -272,6 +291,42 @@ public class Main {
     tutee.destroy()
   })
 
+  test('tutor posts problem images; tutees see them read-only', async () => {
+    assert.equal((await upload(PNG)).status, 401)
+    assert.equal((await upload(PNG, 'nope')).status, 401)
+    assert.equal((await upload('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>', '4321')).status, 415)
+    assert.equal((await upload(Buffer.concat([PNG, Buffer.alloc(MAX_IMAGE_BYTES)]), '4321')).status, 413)
+
+    const res = await upload(PNG, '4321')
+    assert.equal(res.status, 200)
+    const { file } = (await res.json()) as { file: string }
+    const img = await fetch(`${BASE}${problemImageUrl(file)}`)
+    assert.equal(img.headers.get('content-type'), 'image/png')
+    assert.deepEqual(Buffer.from(await img.arrayBuffer()), PNG)
+    assert.equal((await fetch(`${BASE}${IMAGE_API}/..%2Froster.json`)).status, 404)
+
+    const tutor = connect(PROBLEM_DOC, TUTOR)
+    const me = await join('문제보기')
+    const tutee = connect(PROBLEM_DOC, JSON.stringify({ role: 'tutee', id: me.id, secret: me.secret }))
+    await Promise.all([synced(tutor), synced(tutee)])
+    tutor.document.transact(() => {
+      tutor.document.getMap<ProblemEntry>(K_PROBLEMS).set('p1', { title: '문제 1', images: [file], createdAt: Date.now() })
+      tutor.document.getMap(K_POSTED).set('id', 'p1')
+    })
+    await until(() => tutee.document.getMap(K_POSTED).get('id') === 'p1', 5000, 'posted problem sync')
+    assert.deepEqual(tutee.document.getMap<ProblemEntry>(K_PROBLEMS).get('p1')?.images, [file])
+
+    // a tutee's edits to the problem doc are dropped by the server
+    tutee.document.getMap(K_POSTED).set('id', 'hacked')
+    await new Promise((r) => setTimeout(r, 300))
+    assert.equal(tutor.document.getMap(K_POSTED).get('id'), 'p1')
+
+    const del = await fetch(`${BASE}${problemImageUrl(file)}`, { method: 'DELETE' })
+    assert.equal(del.status, 401)
+    tutor.destroy()
+    tutee.destroy()
+  })
+
   test('workspace survives a server restart', async () => {
     const me = await join('정저장')
     const tutee = connect(tuteeDocName(me.id), JSON.stringify({ role: 'tutee', id: me.id, secret: me.secret }))
@@ -294,5 +349,15 @@ public class Main {
     await synced(back)
     assert.equal(back.document.getMap<Y.Text>(K_FILES).get('Cat.java')?.toString(), 'public class Cat {}\n')
     back.destroy()
+
+    const problem = connect(PROBLEM_DOC, TUTOR)
+    await synced(problem)
+    assert.equal(problem.document.getMap(K_POSTED).get('id'), 'p1', 'posted problem survives restart')
+    const file = problem.document.getMap<ProblemEntry>(K_PROBLEMS).get('p1')!.images[0]
+    assert.equal((await fetch(`${BASE}${problemImageUrl(file)}`)).status, 200)
+    const del = await fetch(`${BASE}${problemImageUrl(file)}`, { method: 'DELETE', headers: { 'X-Tutor-Code': '4321' } })
+    assert.equal(del.status, 200)
+    assert.equal((await fetch(`${BASE}${problemImageUrl(file)}`)).status, 404)
+    problem.destroy()
   })
 })

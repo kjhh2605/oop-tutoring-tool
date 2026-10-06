@@ -1,9 +1,12 @@
 import type { HocuspocusProvider, HocuspocusProviderWebsocket } from '@hocuspocus/provider'
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { K_TUTEES, ROSTER_DOC, tuteeDocName, type RosterCommand, type RosterEntry } from '../../../shared/protocol.ts'
+import type * as Y from 'yjs'
+import { K_TUTEES, PROBLEM_DOC, ROSTER_DOC, tuteeDocName, type RosterCommand, type RosterEntry } from '../../../shared/protocol.ts'
+import { ProblemManager } from '../components/ProblemManager.tsx'
 import { TuteeCard } from '../components/TuteeCard.tsx'
 import { Workspace } from '../components/Workspace.tsx'
 import { createSocket, makeUser, openDoc, useConnectionStatus, usePeers, useSynced, useYObserve } from '../lib/collab.ts'
+import { postedOf, postedProblem, problemsOf } from '../lib/problems.ts'
 import { loadJson, saveJson } from '../lib/storage.ts'
 
 const KEY = 'tutoring.tutorCode'
@@ -60,13 +63,17 @@ function TutorSession({ code, onSignOut }: { code: string; onSignOut: () => void
   const token = JSON.stringify({ role: 'tutor', code })
   const [socket, setSocket] = useState<HocuspocusProviderWebsocket | null>(null)
   const [roster, setRoster] = useState<HocuspocusProvider | null>(null)
+  const [problem, setProblem] = useState<HocuspocusProvider | null>(null)
 
   useEffect(() => {
     const s = createSocket()
     const r = openDoc(s, ROSTER_DOC, token, { onAuthenticationFailed: onSignOut })
+    const p = openDoc(s, PROBLEM_DOC, token)
     setSocket(s)
     setRoster(r)
+    setProblem(p)
     return () => {
+      p.destroy()
       r.destroy()
       s.destroy()
     }
@@ -118,6 +125,8 @@ function TutorSession({ code, onSignOut }: { code: string; onSignOut: () => void
   }, [])
 
   const [focusId, setFocusId] = useState<string | null>(null)
+  const [problemsOpen, setProblemsOpen] = useState(false)
+  const closeProblems = useCallback(() => setProblemsOpen(false), [])
   const focused = focusId ? conns.current.get(focusId) : undefined
 
   // Tell the focused tutee that the tutor is looking.
@@ -135,7 +144,8 @@ function TutorSession({ code, onSignOut }: { code: string; onSignOut: () => void
           e.stopPropagation()
           setFocusId(t.id)
         }
-      } else if (e.key === 'Escape' && focusId && !e.defaultPrevented) {
+      } else if (e.key === 'Escape' && focusId && !e.defaultPrevented && !document.querySelector('.overlay')) {
+        // Open dialogs / image zoom close themselves on Esc first.
         setFocusId(null)
       }
     }
@@ -149,9 +159,15 @@ function TutorSession({ code, onSignOut }: { code: string; onSignOut: () => void
     if (focusId === id) setFocusId(null)
   }
 
-  if (!roster || !synced) return <div className="center-screen muted">연결 중…</div>
+  if (!roster || !problem || !synced) return <div className="center-screen muted">연결 중…</div>
 
   const offline = status !== 'connected' && <span className="badge offline">연결 끊김 · 재연결 중</span>
+  const problems = (
+    <>
+      <ProblemButton doc={problem.document} onClick={() => setProblemsOpen(true)} />
+      {problemsOpen && <ProblemManager doc={problem.document} code={code} onClose={closeProblems} />}
+    </>
+  )
 
   if (focused) {
     const entry = tutees.find((t) => t.id === focusId)
@@ -172,10 +188,11 @@ function TutorSession({ code, onSignOut }: { code: string; onSignOut: () => void
             </button>
           ))}
           <span className="spacer" />
+          {problems}
           {offline}
           <span className="me tutor">튜터</span>
         </nav>
-        <FocusedWorkspace key={focusId} provider={focused.provider} name={entry?.name ?? ''} />
+        <FocusedWorkspace key={focusId} provider={focused.provider} name={entry?.name ?? ''} problemDoc={problem.document} />
       </div>
     )
   }
@@ -186,6 +203,7 @@ function TutorSession({ code, onSignOut }: { code: string; onSignOut: () => void
         <strong>튜티 {tutees.length}명</strong>
         <span className="muted small">카드를 클릭하거나 Alt+번호로 들어가 바로 수정할 수 있습니다 · Esc로 돌아오기</span>
         <span className="spacer" />
+        {problems}
         {offline}
         <span className="me tutor">튜터</span>
       </nav>
@@ -214,7 +232,7 @@ function TutorSession({ code, onSignOut }: { code: string; onSignOut: () => void
   )
 }
 
-function FocusedWorkspace({ provider, name }: { provider: HocuspocusProvider; name: string }) {
+function FocusedWorkspace({ provider, name, problemDoc }: { provider: HocuspocusProvider; name: string; problemDoc: Y.Doc }) {
   const synced = useSynced(provider)
   const peers = usePeers(provider.awareness)
   if (!synced) return <div className="center-screen muted">불러오는 중…</div>
@@ -224,8 +242,20 @@ function FocusedWorkspace({ provider, name }: { provider: HocuspocusProvider; na
       provider={provider}
       role="tutor"
       initialFile={tutee?.activeFile}
+      problemDoc={problemDoc}
       toolbar={<span className="muted small">{name} 님의 코드 · 입력하면 튜티 화면에 바로 반영됩니다</span>}
     />
+  )
+}
+
+function ProblemButton({ doc, onClick }: { doc: Y.Doc; onClick: () => void }) {
+  useYObserve(problemsOf(doc))
+  useYObserve(postedOf(doc))
+  const posted = postedProblem(doc)
+  return (
+    <button className={`btn ${posted ? 'posted' : 'ghost'}`} onClick={onClick} title="문제 이미지를 올리고 튜티 화면에 게시합니다">
+      📋 {posted ? `${posted.title} 게시 중` : '문제 게시'}
+    </button>
   )
 }
 

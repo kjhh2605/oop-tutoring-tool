@@ -2,6 +2,7 @@
 
 export const COLLAB_PATH = '/collab'
 export const ROSTER_DOC = 'roster'
+export const PROBLEM_DOC = 'problem' // shared by everyone; tutees connect read-only
 export const TUTEE_DOC_PREFIX = 'tutee/'
 
 export const tuteeDocName = (id: string) => `${TUTEE_DOC_PREFIX}${id}`
@@ -16,6 +17,10 @@ export const K_MARKS = 'marks' // Y.Map<fileName, Y.Array<TutorMark>>
 // Keys inside the roster Y.Doc
 export const K_TUTEES = 'tutees' // Y.Map<id, RosterEntry>
 
+// Keys inside the problem Y.Doc
+export const K_PROBLEMS = 'problems' // Y.Map<id, ProblemEntry>
+export const K_POSTED = 'posted' // Y.Map: { id: string | null } — the problem shown to tutees
+
 export type Role = 'tutor' | 'tutee'
 
 export type AuthToken =
@@ -26,6 +31,17 @@ export interface RosterEntry {
   name: string
   joinedAt: number
 }
+
+export interface ProblemEntry {
+  title: string
+  images: string[] // image file names, see problemImageUrl
+  rotations?: Record<string, number> // file -> clockwise degrees (0/90/180/270), applied when displayed
+  createdAt: number
+}
+
+export const IMAGE_API = '/api/images'
+export const MAX_IMAGE_BYTES = 10 * 1024 * 1024
+export const problemImageUrl = (file: string) => `${IMAGE_API}/${file}`
 
 export type RunState = 'idle' | 'compiling' | 'running' | 'exited' | 'compile-error' | 'stopped'
 

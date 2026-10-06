@@ -1,5 +1,6 @@
 import type { HocuspocusProvider } from '@hocuspocus/provider'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import type * as Y from 'yjs'
 import type { Role } from '../../../shared/protocol.ts'
 import { CodeEditor } from '../editor/CodeEditor.tsx'
 import { usePeers, useYObserve } from '../lib/collab.ts'
@@ -7,17 +8,20 @@ import { loadJson, saveJson } from '../lib/storage.ts'
 import { clearMarks, diagnosticsOf, filesOf, hasMarks, listFiles, marksOf } from '../lib/workspace.ts'
 import { ConsolePanel } from './ConsolePanel.tsx'
 import { FileTabs } from './FileTabs.tsx'
+import { ProblemPanel } from './ProblemPanel.tsx'
 
 interface Props {
   provider: HocuspocusProvider
   role: Role
   initialFile?: string
   toolbar?: ReactNode
+  /** Shared problem doc; the posted problem is shown beside the editor. */
+  problemDoc?: Y.Doc
 }
 
 const FOLLOW_KEY = 'tutoring.followTutee'
 
-export function Workspace({ provider, role, initialFile, toolbar }: Props) {
+export function Workspace({ provider, role, initialFile, toolbar, problemDoc }: Props) {
   const doc = provider.document
   const awareness = provider.awareness!
   const files = filesOf(doc)
@@ -97,21 +101,26 @@ export function Workspace({ provider, role, initialFile, toolbar }: Props) {
           {toolbar}
         </div>
       </div>
-      <div className="ws-editor">
-        {ytext && active ? (
-          <CodeEditor
-            key={`${active}`}
-            ytext={ytext}
-            fileName={active}
-            awareness={awareness}
-            recordTutorMarks={role === 'tutor'}
-            autoFocus
-          />
-        ) : (
-          <div className="empty">파일이 없습니다. “+ 클래스”로 새 파일을 만드세요.</div>
-        )}
+      <div className="ws-body">
+        {problemDoc && <ProblemPanel doc={problemDoc} />}
+        <div className="ws-main">
+          <div className="ws-editor">
+            {ytext && active ? (
+              <CodeEditor
+                key={`${active}`}
+                ytext={ytext}
+                fileName={active}
+                awareness={awareness}
+                recordTutorMarks={role === 'tutor'}
+                autoFocus
+              />
+            ) : (
+              <div className="empty">파일이 없습니다. “+ 클래스”로 새 파일을 만드세요.</div>
+            )}
+          </div>
+          <ConsolePanel provider={provider} activeFile={active ?? ''} runRef={runRef} />
+        </div>
       </div>
-      <ConsolePanel provider={provider} activeFile={active ?? ''} runRef={runRef} />
     </div>
   )
 }

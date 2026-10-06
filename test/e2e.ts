@@ -180,10 +180,72 @@ public class Main {
   await tutor.locator('.tutee-card').first().waitFor()
   await shot(tutor, '5-dashboard-after')
 
+  step('tutor posts a problem (file pick + paste) → every tutee sees it')
+  await tutor.getByRole('button', { name: '📋 문제 게시' }).click()
+  const problemPng = await jieun.screenshot({ clip: { x: 0, y: 0, width: 600, height: 300 } })
+  await tutor.locator('.problem-manager input[type=file]').setInputFiles({ name: 'p1.png', mimeType: 'image/png', buffer: problemPng })
+  await tutor.locator('.pm-image img').first().waitFor({ timeout: 5000 })
+  await tutor.evaluate(async (b64) => {
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
+    const dt = new DataTransfer()
+    dt.items.add(new File([bytes], 'p2.png', { type: 'image/png' }))
+    window.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt }))
+  }, problemPng.toString('base64'))
+  await tutor.locator('.pm-image img').nth(1).waitFor({ timeout: 5000 })
+  await tutor.getByRole('button', { name: '이 문제 게시' }).click()
+  await tutor.locator('.pm-item .badge.posted').waitFor()
+  await shot(tutor, '6-problem-manager')
+  await tutor.keyboard.press('Escape')
+  await tutor.locator('.problem-manager').waitFor({ state: 'detached' })
+  await tutor.getByRole('button', { name: '📋 문제 1 게시 중' }).waitFor()
+  for (const page of [minsu, jieun]) {
+    await page.locator('.problem-panel img').nth(1).waitFor({ timeout: 5000 })
+    assert.ok(await page.locator('.problem-panel img').first().evaluate((img: HTMLImageElement) => img.naturalWidth > 0), 'image loads')
+  }
+  await shot(minsu, '7-tutee-problem')
+
+  step('tutor rotates an image 90° → tutees see it turned (taller than wide)')
+  await tutor.getByRole('button', { name: '📋 문제 1 게시 중' }).click()
+  await tutor.locator('.pm-image').first().getByTitle('오른쪽으로 90° 회전').click()
+  await tutor.keyboard.press('Escape')
+  const rotated = minsu.locator('.problem-panel .rot-box').first()
+  await rotated.waitFor({ timeout: 5000 })
+  await minsu.waitForFunction(() => (document.querySelector('.problem-panel .rot-box') as HTMLElement).offsetHeight > 0)
+  const box = (await rotated.boundingBox())!
+  assert.ok(box.height > box.width * 1.5, `rotated box is portrait: ${box.width}x${box.height}`) // source is 600×300
+  const imgBox = (await rotated.locator('img').boundingBox())!
+  assert.ok(Math.abs(imgBox.width - box.width) < 2 && Math.abs(imgBox.height - box.height) < 2, 'image fills its box')
+  await shot(minsu, '8-tutee-rotated')
+
+  step('tutee zooms an image and collapses / reopens the panel')
+  await minsu.locator('.problem-panel .rot-box').first().click()
+  await minsu.locator('.lightbox .rot-box img').waitFor()
+  await minsu.keyboard.press('Escape')
+  await minsu.locator('.lightbox').waitFor({ state: 'detached' })
+  await minsu.getByTitle('문제 접기').click()
+  await minsu.locator('.problem-panel').waitFor({ state: 'detached' })
+  await minsu.locator('.problem-tab').click()
+  await minsu.locator('.problem-panel img').first().waitFor()
+
+  step('tutor focus view shows the problem too; Esc in zoom does not leave the tutee')
+  await tutor.keyboard.press('Alt+Digit1')
+  await tutor.locator('.problem-panel .rot-box').first().click()
+  await tutor.keyboard.press('Escape')
+  await tutor.locator('.lightbox').waitFor({ state: 'detached' })
+  assert.equal(await tutor.locator('.btn.chip.active', { hasText: '민수' }).count(), 1, 'still in focus view')
+  await tutor.keyboard.press('Escape')
+  await tutor.locator('.tutee-card').first().waitFor()
+
   step('tutee reload keeps identity and code')
   await minsu.reload()
   await minsu.locator('.tab', { hasText: 'Dog.java' }).waitFor()
   assert.equal(await minsu.locator('.tab').count(), 3)
+  await minsu.locator('.problem-panel img').first().waitFor()
+
+  step('tutor takes the problem down → panel disappears')
+  await tutor.getByRole('button', { name: '📋 문제 1 게시 중' }).click()
+  await tutor.getByRole('button', { name: '게시 내리기' }).click()
+  await minsu.locator('.problem-panel').waitFor({ state: 'detached', timeout: 5000 })
 
   console.log('\nE2E OK — screenshots in .tmp-e2e/')
 } finally {

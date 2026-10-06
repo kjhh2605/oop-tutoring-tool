@@ -1,12 +1,16 @@
+import { createReadStream } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Server, type Hocuspocus } from '@hocuspocus/server'
 import * as Y from 'yjs'
 import {
   COLLAB_PATH,
+  IMAGE_API,
   K_FILES,
   K_RUN,
   K_TUTEES,
   MAIN_TEMPLATE,
+  MAX_IMAGE_BYTES,
+  PROBLEM_DOC,
   ROSTER_DOC,
   TUTEE_DOC_PREFIX,
   tuteeDocName,
@@ -18,7 +22,7 @@ import {
 import type { Jdk } from './jdk.ts'
 import { JavaRunner, type RunnerOptions } from './runner.ts'
 import { serveStatic } from './static.ts'
-import { DocStore, Roster } from './store.ts'
+import { DocStore, ImageStore, Roster, sniffImage } from './store.ts'
 
 export type ConnContext = { role: 'tutor' } | { role: 'tutee'; id: string; name: string } | { role: 'system' }
 
@@ -46,6 +50,8 @@ const MAX_NAME = 20
 export function createApp(opts: AppOptions): App {
   const store = new DocStore(opts.dataDir)
   const roster = new Roster(opts.dataDir)
+  const images = new ImageStore(opts.dataDir)
+  const isStoredDoc = (name: string) => name === PROBLEM_DOC || name.startsWith(TUTEE_DOC_PREFIX)
 
   const server: Server<ConnContext> = new Server<ConnContext>({
     port: opts.port,
@@ -71,14 +77,15 @@ export function createApp(opts: AppOptions): App {
       }
       if (auth.role === 'tutor') {
         if (auth.code !== opts.tutorCode) throw new Error('wrong tutor code')
-        if (documentName !== ROSTER_DOC && !documentName.startsWith(TUTEE_DOC_PREFIX)) throw new Error('unknown doc')
+        if (documentName !== ROSTER_DOC && !isStoredDoc(documentName)) throw new Error('unknown doc')
         return { role: 'tutor' }
       }
       if (auth.role === 'tutee') {
         const rec = roster.get(auth.id)
         if (!rec || rec.secret !== auth.secret) throw new Error('unknown tutee')
-        if (documentName !== tuteeDocName(rec.id)) throw new Error('forbidden')
-        connectionConfig.readOnly = false
+        if (documentName === PROBLEM_DOC) connectionConfig.readOnly = true
+        else if (documentName === tuteeDocName(rec.id)) connectionConfig.readOnly = false
+        else throw new Error('forbidden')
         return { role: 'tutee', id: rec.id, name: rec.name }
       }
       throw new Error('invalid role')
@@ -92,9 +99,10 @@ export function createApp(opts: AppOptions): App {
         })
         return
       }
-      if (!documentName.startsWith(TUTEE_DOC_PREFIX)) return
+      if (!isStoredDoc(documentName)) return
       const saved = await store.load(documentName)
       if (saved) Y.applyUpdate(document, saved)
+      if (documentName === PROBLEM_DOC) return
       document.transact(() => {
         const files = document.getMap<Y.Text>(K_FILES)
         if (files.size === 0) files.set('Main.java', new Y.Text(MAIN_TEMPLATE))
@@ -108,7 +116,7 @@ export function createApp(opts: AppOptions): App {
     },
 
     async onStoreDocument({ document, documentName }) {
-      if (!documentName.startsWith(TUTEE_DOC_PREFIX)) return
+      if (!isStoredDoc(documentName)) return
       await store.save(documentName, Y.encodeStateAsUpdate(document))
     },
 
@@ -178,6 +186,32 @@ export function createApp(opts: AppOptions): App {
           ? sendJson(res, 200, { ok: true })
           : sendJson(res, 401, { error: '튜터 코드가 올바르지 않습니다.' })
       }
+      if (url.pathname === IMAGE_API && req.method === 'POST') {
+        if (!isTutor(req)) return sendJson(res, 401, { error: '튜터만 문제를 올릴 수 있습니다.' })
+        const body = await readBody(req, MAX_IMAGE_BYTES)
+        if (!body) return sendJson(res, 413, { error: `이미지는 ${MAX_IMAGE_BYTES / 1024 / 1024}MB 이하만 올릴 수 있습니다.` })
+        const ext = sniffImage(body)
+        if (!ext) return sendJson(res, 415, { error: 'PNG, JPG, GIF, WEBP 이미지만 올릴 수 있습니다.' })
+        return sendJson(res, 200, { file: await images.save(body, ext) })
+      }
+      if (url.pathname.startsWith(IMAGE_API + '/')) {
+        const file = url.pathname.slice(IMAGE_API.length + 1)
+        if (req.method === 'DELETE') {
+          if (!isTutor(req)) return sendJson(res, 401, { error: '튜터만 문제를 지울 수 있습니다.' })
+          await images.remove(file)
+          return sendJson(res, 200, { ok: true })
+        }
+        const found = await images.find(file)
+        if (!found) return sendJson(res, 404, { error: 'not found' })
+        res.writeHead(200, {
+          'Content-Type': found.type,
+          'Content-Length': found.size,
+          'Cache-Control': 'public, max-age=31536000, immutable', // names are random and never reused
+          'X-Content-Type-Options': 'nosniff',
+        })
+        createReadStream(found.path).pipe(res)
+        return
+      }
       if (url.pathname === '/api/info') {
         return sendJson(res, 200, { java: opts.jdk.version, release: 17 })
       }
@@ -185,6 +219,16 @@ export function createApp(opts: AppOptions): App {
       await serveStatic(opts.webRoot, req, res)
     } catch (err) {
       if (!res.headersSent) sendJson(res, 500, { error: (err as Error).message })
+    }
+  }
+
+  function isTutor(req: IncomingMessage) {
+    const header = req.headers['x-tutor-code']
+    if (typeof header !== 'string') return false
+    try {
+      return decodeURIComponent(header) === opts.tutorCode
+    } catch {
+      return false
     }
   }
 
@@ -205,6 +249,20 @@ export function createApp(opts: AppOptions): App {
 
 function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }).end(JSON.stringify(body))
+}
+
+/** Reads a raw body; resolves null when it exceeds `limit` (the rest is drained so a response can still be sent). */
+function readBody(req: IncomingMessage, limit: number): Promise<Buffer | null> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    let size = 0
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length
+      if (size <= limit) chunks.push(chunk)
+    })
+    req.on('end', () => resolve(size <= limit ? Buffer.concat(chunks) : null))
+    req.on('error', reject)
+  })
 }
 
 function readJson(req: IncomingMessage): Promise<any> {

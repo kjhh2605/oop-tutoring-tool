@@ -1,6 +1,6 @@
 import type { HocuspocusProvider } from '@hocuspocus/provider'
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
-import { tuteeDocName } from '../../../shared/protocol.ts'
+import { PROBLEM_DOC, tuteeDocName } from '../../../shared/protocol.ts'
 import { Workspace } from '../components/Workspace.tsx'
 import { createSocket, makeUser, openDoc, useConnectionStatus, useSynced } from '../lib/collab.ts'
 import { loadJson, saveJson } from '../lib/storage.ts'
@@ -71,7 +71,11 @@ function JoinForm({ onJoined }: { onJoined: (id: Identity) => void }) {
 }
 
 function TuteeSession({ identity, onSignOut }: { identity: Identity; onSignOut: () => void }) {
-  const [state, setState] = useState<{ provider: HocuspocusProvider; socket: ReturnType<typeof createSocket> } | null>(null)
+  const [state, setState] = useState<{
+    provider: HocuspocusProvider
+    problem: HocuspocusProvider
+    socket: ReturnType<typeof createSocket>
+  } | null>(null)
 
   useEffect(() => {
     const socket = createSocket()
@@ -79,8 +83,10 @@ function TuteeSession({ identity, onSignOut }: { identity: Identity; onSignOut: 
     // Unknown identity (e.g. the tutor removed this tutee): go back to the join form.
     const provider = openDoc(socket, tuteeDocName(identity.id), token, { onAuthenticationFailed: onSignOut })
     provider.awareness!.setLocalStateField('user', makeUser(identity.name, 'tutee'))
-    setState({ provider, socket })
+    const problem = openDoc(socket, PROBLEM_DOC, token)
+    setState({ provider, problem, socket })
     return () => {
+      problem.destroy()
       provider.destroy()
       socket.destroy()
     }
@@ -96,6 +102,7 @@ function TuteeSession({ identity, onSignOut }: { identity: Identity; onSignOut: 
       <Workspace
         provider={state.provider}
         role="tutee"
+        problemDoc={state.problem.document}
         toolbar={
           <>
             {status !== 'connected' && <span className="badge offline">연결 끊김 · 재연결 중</span>}
